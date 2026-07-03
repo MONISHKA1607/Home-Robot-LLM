@@ -1,117 +1,3 @@
-"""
-Home robot language agent.
-
-DESIGN
-------
-The model proposes ONE action at a time; the simulator executes it and
-returns a real Result; that result is fed back before the next action is
-proposed. Four layers sit around that loop:
-
-  1. TOOL AWARENESS  -- before every LLM call, the transcript includes an
-                   explicit "AVAILABLE ACTIONS" menu computed from the
-                   robot's actual current state (what's sensed, what's
-                   held, what's unsafe). Actions that are currently
-                   impossible are listed as BLOCKED with the reason, right
-                   next to the actions that are actually legal. The model
-                   is told to only choose from what's marked OK. This
-                   doesn't replace the validator below -- a model can still
-                   ignore the menu -- but in practice it cuts down on wasted
-                   invalid proposals and makes the "I can only act on what
-                   I've verified" constraint something the model reasons
-                   about explicitly, every step, instead of something it
-                   has to infer from a wall of rules.
-  2. VALIDATOR    -- a code-level firewall between the LLM's proposal and
-                   the robot's actuators. The LLM never talks to the robot
-                   directly. Unknown skills, unsafe object categories, and
-                   nonsense locations are rejected here regardless of what
-                   the model decided, regardless of what the menu said.
-                   This is deliberate: a prompt instruction (even a very
-                   explicit one) is a suggestion, this check is a hard rule.
-  3. FAILURE CLASSIFICATION -- every failure is tagged (perception /
-                   execution / capability / safety / planning) instead of
-                   being handled identically. A failed grasp (execution) is
-                   worth retrying; an unsensed object (perception) should
-                   prompt more exploration, not a retry; an out-of-scope
-                   request (capability) should just be declined.
-  4. MISSION TRACE -- every step is logged as a structured record, and a
-                   short mission report is printed at the end (rooms
-                   visited, actions taken, retries, failures by type,
-                   whether the task finished). This never talks over the
-                   robot's own speech, it's just an execution trace for
-                   debugging / explainability.
-
-Why this covers what we're scored on:
-
-- Grounding    : the model can only `pick` an object that shows up in
-                 robot.known_objects, which is only populated by an actual
-                 navigate_to() call -- and the available-actions menu shows
-                 this to the model plainly every step, so "I haven't
-                 verified this" is visible, not implicit.
-- Safety       : UNSAFE_CATEGORIES is enforced in the validator, not just
-                 the prompt (and surfaced pre-emptively in the menu as a
-                 BLOCKED line with the reason, so the model doesn't even
-                 have to be told "no" after the fact).
-- Ambiguity    : the model is instructed to check known_objects for
-                 multiple matches to a vague request and ask instead of
-                 guessing.
-- Recovery     : transient pick() failures ("grasp slipped") are classified
-                 as execution failures and retried a bounded number of
-                 times at the code level, then reported to the person
-                 honestly instead of pretending the task succeeded.
-
-A hard step budget (MAX_STEPS) also protects against the model looping
-forever -- a recovery concern for the agent's own logic rather than the
-robot's.
-
-WHY LOCATIONS ARE SHUFFLED IN THE MENU
----------------------------------------
-robot.known_locations is alphabetically sorted (from home_robot_sim.py,
-which I can't edit). In testing, smaller/local models leaned on that fixed
-list order as an implicit search-order prior -- e.g. checking
-"bedside_table" early on almost every task, including ones with no
-plausible connection to the bedroom, simply because it's early
-alphabetically. Shuffling presentation order per call removes that
-accidental bias without introducing a new hardcoded one (see "what I
-deliberately left out" below for why I avoided a fixed "furniture first"
-order deliberately).
-
-What I deliberately left out
------------------------------
-Earlier planning notes floated a much longer list of additions (full finite
-state machine, confidence-scored world memory, separate energy/time/retry
-budgets, an LLM-generated reasoning narrative, a PromptBuilder abstraction,
-a dedicated WorldState class, etc.). Most of that is real for production
-robotics stacks but would bury this assignment's actual scoring criteria
-under machinery that doesn't add new behaviour here -- the robot object
-already *is* the world state, and wrapping it would just be indirection.
-
-I also considered a deterministic "search this type of location first"
-exploration heuristic (e.g. always check furniture-like spots -- counters,
-tables, desks -- before room anchors). I left it out on purpose: it would
-mean reordering the locations shown to the model based on a hardcoded
-notion of where objects "usually" are, which (a) risks quietly encoding
-assumptions tuned to the *visible* test set rather than genuine general
-reasoning, and (b) could burn steps against MAX_STEPS on a hidden test
-where that assumption doesn't hold (e.g. an object that lives directly at
-a room anchor rather than a furniture location). Instead, the
-available-actions menu tags each unvisited location with what kind of spot
-it is (furniture vs. room anchor) purely as *information*, without forcing
-an order -- the model still decides where to look first, using the actual
-wording of the request. (The shuffle above is orthogonal to this: it
-removes an *accidental* order bias, it doesn't add an intentional one.)
-
-LLM PROVIDER
-------------
-Defaults to Groq (free tier, OpenAI-compatible /chat/completions endpoint,
-fast enough for an 8-10 step loop). Swap by setting LLM_PROVIDER, no other
-code needs to change:
-
-    export GROQ_API_KEY=...          # default, LLM_PROVIDER=groq
-    export ANTHROPIC_API_KEY=...     # LLM_PROVIDER=anthropic
-    export GEMINI_API_KEY=...        # LLM_PROVIDER=gemini
-    export OLLAMA_HOST=http://localhost:11434   # LLM_PROVIDER=ollama (no key needed)
-"""
-
 import json
 import os
 import random
@@ -121,18 +7,15 @@ import urllib.error
 
 PROVIDER = os.environ.get("LLM_PROVIDER", "groq")
 MAX_STEPS = 10
-MAX_PICK_RETRIES = 2  # extra attempts after the first, for transient grasp slips
+MAX_PICK_RETRIES = 2  
 
-# category -> (spoken reason). Checked in the validator before any pick()
-# call goes through, independent of what the LLM decided.
+
 UNSAFE_CATEGORIES = {
     "sharp_utensil": "it's sharp and I'd rather not hand it over myself",
     "medication": "medication should only be handed out with a person confirming it's the right dose for the right person",
 }
 
-# Purely informational tagging used in the available-actions menu -- helps
-# the model reason about where objects are likely to be without forcing a
-# fixed search order (see "What I deliberately left out" above).
+
 LOCATION_KIND = {
     "kitchen_counter": "furniture -- often holds several objects",
     "dining_table":    "furniture -- often holds several objects",
@@ -150,12 +33,11 @@ LOCATION_KIND = {
 class FailureType:
     """Tags for why a step didn't go through, so recovery can differ by cause
     instead of treating every failure the same way."""
-    PERCEPTION = "perception"   # object/location hasn't actually been sensed
-    EXECUTION = "execution"     # action was attempted but physically failed (grasp slip)
-    CAPABILITY = "capability"   # not a skill the robot has / out of scope
-    SAFETY = "safety"           # blocked by the safety guard
-    PLANNING = "planning"       # malformed model output, bad args, step budget exhausted
-
+    PERCEPTION = "perception"   
+    EXECUTION = "execution"    
+    CAPABILITY = "capability"   
+    SAFETY = "safety"           
+    PLANNING = "planning"      
 
 SYSTEM_TEMPLATE = """You control a real home robot. You act ONE step at a time -- \
 you will be shown the result of each action before choosing the next one, so \
@@ -225,10 +107,6 @@ For speak, put the sentence to say in "arg".
 """
 
 
-# ---------------------------------------------------------------------------
-# LLM call -- provider adapter. Only this function needs to change to swap
-# models; the agent logic above/below never talks to a provider directly.
-# ---------------------------------------------------------------------------
 
 def call_llm(system, transcript_text):
     if PROVIDER == "groq":
@@ -359,27 +237,7 @@ def _parse_action(raw):
     except Exception:
         return None, None, None
 
-
-# ---------------------------------------------------------------------------
-# Validator -- the only place that is allowed to say "no" to the robot on
-# the LLM's behalf. Kept deliberately dumb and rule-based: no LLM calls,
-# no ambiguity, just hard checks. This is the backstop the menu can't
-# replace: the menu shapes what the model *proposes*, the validator decides
-# what actually reaches the robot, no matter what was proposed.
-# ---------------------------------------------------------------------------
-
 def validate_action(robot, action, arg, pickup_location=None):
-    """Check whether a proposed action is even allowed to reach the robot.
-
-    Returns (ok, refusal_message, failure_type).
-    - ok=True                    -> go ahead and execute against the sim.
-    - ok=False, message set      -> reject outright, speak the message.
-    - ok=False, message=None     -> reject silently, let the sim's own
-                                     Result carry the explanation (this is
-                                     used for the ordinary "haven't sensed
-                                     this yet" case, which is a normal part
-                                     of exploration, not a violation).
-    """
     allowed_skills = {"navigate_to", "pick", "place", "speak", "done"}
 
     if action not in allowed_skills:
@@ -405,17 +263,12 @@ def validate_action(robot, action, arg, pickup_location=None):
             return False, (f"I'm already holding '{robot.holding}' -- "
                             f"I need to place it before picking something else."), FailureType.PLANNING
         if arg not in robot.known_objects:
-            # Not a violation -- just means the model needs to explore more
-            # before it can act. Let the sim's own grounding check produce
-            # the message so there's a single source of truth for it.
             return False, None, FailureType.PERCEPTION
         category = robot.known_objects[arg]["category"]
         if category in UNSAFE_CATEGORIES:
             return False, (f"I'd rather not bring you the {arg} myself -- "
                             f"{UNSAFE_CATEGORIES[category]}."), FailureType.SAFETY
         return True, None, None
-
-    # place / speak / done: no extra checks beyond what the sim itself does
     return True, None, None
 
 
@@ -426,13 +279,9 @@ def validate_action(robot, action, arg, pickup_location=None):
 class Agent:
     def __init__(self, robot):
         self.robot = robot
-        # persists across handle() calls in interactive mode, so a
-        # clarifying question the robot asked can be answered as a
-        # follow-up command without losing context.
         self.turns = []
         self.visited_locations = []
-        # structured execution trace for this call, used for the mission
-        # report -- separate from `turns`, which is the LLM-facing transcript.
+       
         self.trace = []
         self._recent_actions = []
         self._consecutive_speaks = 0
@@ -482,12 +331,7 @@ class Agent:
                 outcome = "done"
                 break
 
-            # --- loop guard: same (action, arg) proposed 3x in a row, or an
-            # A-B-A-B alternating pattern, means the model is stuck, not
-            # exploring -- stop it here rather than burning the whole step
-            # budget on repetition. Checked against the *most recent* 3/4
-            # actions every step (not just the first 3 of the task), so it
-            # still catches a late-task repeat, not only an early one.
+        
             signature = (action, arg)
             self._recent_actions.append(signature)
             self._recent_actions = self._recent_actions[-4:]
@@ -512,11 +356,7 @@ class Agent:
                 outcome = "loop_detected"
                 break
 
-            # --- consecutive-speak guard: the model has no way to get a
-            # live reply mid-run, so speaking twice in a row (even with
-            # different wording) means it's stuck waiting for a response
-            # that will never come. Deliver the second message, then end
-            # the turn gracefully instead of letting it ramble further.
+          
             if action == "speak":
                 self._consecutive_speaks = getattr(self, "_consecutive_speaks", 0) + 1
             else:
@@ -532,14 +372,11 @@ class Agent:
                 break
 
 
-            # --- validator: the LLM never talks to the robot directly ---
-            # --- validator: the LLM never talks to the robot directly ---
+          
             ok, refusal, failure_type = validate_action(self.robot, action, arg, self.last_pickup_location)
 
             if not ok and action == "place" and failure_type == FailureType.PLANNING:
-                # Recoverable planning misstep, not a dead end -- the robot
-                # is still holding the object and can still deliver it.
-                # Correct the model in-loop instead of ending the task.
+              
                 self.turns.append(f"OBSERVATION: place rejected -- {refusal}")
                 self._log(step_num, action, arg, False, failure_type, refusal)
                 continue
@@ -620,17 +457,7 @@ class Agent:
             "detail": detail,
         })
 
-    # -----------------------------------------------------------------
-    # Tool awareness: computed fresh every step from the robot's real
-    # state. This is informational only -- the validator is still the
-    # thing that actually enforces any of it -- but it means the model
-    # is reasoning over "what can I legally do right now" instead of
-    # having to infer that from a paragraph of rules.
-    #
-    # Location order is shuffled each call (see module docstring) so the
-    # model can't lean on the underlying alphabetical list order as an
-    # implicit, unintended search-order prior.
-    # -----------------------------------------------------------------
+   
     def _available_actions(self):
         robot = self.robot
         lines = []
@@ -678,8 +505,7 @@ class Agent:
                 "genuinely different or use speak+done to report you cannot complete this.\n"
             )
 
-        recent_turns = self.turns[-8:]  # cap history sent each call to limit token growth
-
+        recent_turns = self.turns[-8:] 
         state = (
             f"Current location: {self.robot.current_location}\n"
             f"Holding: {self.robot.holding}\n"
