@@ -1,4 +1,4 @@
-# 🤖 Home Robot Language Agent
+# Home Robot Language Agent
 
 A natural-language control layer for a simulated home robot — turns plain-English requests like *"bring me the towel"* into safe, grounded, recoverable robot behavior, backed by a real LLM reasoning loop and a code-level safety firewall.
 
