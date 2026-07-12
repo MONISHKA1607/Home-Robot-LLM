@@ -64,16 +64,6 @@ Four layers, each doing one job:
 - ✅ **Loop protection** — a 3-in-a-row or alternating-pattern detector catches a model that's stuck, and ends the turn gracefully instead of burning the whole step budget on repetition.
 - ✅ **Scope discipline** — asked to open a window or turn on a TV, it says plainly it can't, and doesn't keep exploring afterward looking for a workaround.
 
-## A real bug I hit (and how it got fixed)
-
-Early on, the robot would occasionally pick an object up, place it right back down at the same spot, then navigate away and confidently report *"I already brought you the book"* — a hallucinated success. The fix wasn't a bigger prompt — it was moving the rule into the validator as a hard block. But a naive hard block turned out to make things *worse*: rejecting the bad `place()` and then ending the task left the robot standing there still holding the object with the task marked failed. The real fix was a bounded, in-loop correction — reject, explain why as an observation, let the model try again — which is the same "validate, don't just prompt" philosophy applied one level deeper than I'd originally planned.
-
-## Design choices I stand behind
-
-- **No hardcoded search order.** I could have told the model to always check furniture before room anchors. I didn't — that risks tuning to the visible test set and could burn steps on a hidden layout where the assumption doesn't hold. Instead, the action menu tags each location by *kind* (furniture vs. room anchor) as pure information, and location order is shuffled per call so the model can't lean on an accidental alphabetical bias either.
-- **Provider-agnostic by construction.** Swapping Groq → Anthropic → Gemini → local Ollama is a one-line env var change (`LLM_PROVIDER`). The agent logic never talks to a provider directly.
-- **Deliberately no state machine, no confidence-scored memory, no PromptBuilder abstraction.** All real patterns in production robotics — all indirection that wouldn't have changed observable behavior on *this* problem. The robot object already *is* the world state.
-
 ## Running it
 
 ```bash
