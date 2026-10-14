@@ -113,7 +113,7 @@ def call_llm(system, transcript_text):
         return _call_openai_compatible(
             url="https://api.groq.com/openai/v1/chat/completions",
             api_key=os.environ["GROQ_API_KEY"],
-            model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            model=os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b"),
             system=system, user=transcript_text,
         )
     if PROVIDER == "ollama":
@@ -170,7 +170,7 @@ def _call_openai_compatible(url, api_key, model, system, user, timeout=30):
 
 def _call_anthropic(system, user):
     body = json.dumps({
-        "model": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5"),
+        "model": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5-5"),
         "max_tokens": 300,
         "system": system,
         "messages": [{"role": "user", "content": user}],
@@ -277,8 +277,9 @@ def validate_action(robot, action, arg, pickup_location=None):
 # ---------------------------------------------------------------------------
 
 class Agent:
-    def __init__(self, robot):
+    def __init__(self, robot, seed=0):
         self.robot = robot
+        self._rng = random.Random(seed)   # own RNG -> reproducible menu order
         self.turns = []
         self.visited_locations = []
        
@@ -294,6 +295,8 @@ class Agent:
         self.trace = []
         self._recent_actions = []
         self._consecutive_speaks = 0
+        self.visited_locations = []        # fresh start for every new request
+        self.last_pickup_location = None
         outcome = "incomplete"
 
         for step_num in range(1, MAX_STEPS + 1):
@@ -316,6 +319,13 @@ class Agent:
                 break
 
             action, arg, why = _parse_action(raw)
+            if action is None:   # one cheap retry before giving up on bad JSON
+                try:
+                    raw = call_llm(system, transcript + "\n\nYour last reply was not a valid "
+                                   "JSON object. Reply with ONLY the JSON object.")
+                    action, arg, why = _parse_action(raw)
+                except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, KeyError):
+                    pass
             print(f"   [PROPOSED] action={action!r} arg={arg!r} why={why!r}")
 
             if action is None:
@@ -419,13 +429,12 @@ class Agent:
 
         
 
-            if action == "navigate_to" and result.ok and arg not in self.visited_locations:
-                self.visited_locations.append(arg)
-
-            if action == "pick" and not result.ok and "slipped" in result.message:
+            if action == "pick" and not result.ok and result.code == "grasp_slipped":
                 pick_fail_counts[arg] = pick_fail_counts.get(arg, 0) + 1
                 self._log(step_num, action, arg, False, FailureType.EXECUTION, result.message)
                 if pick_fail_counts[arg] <= MAX_PICK_RETRIES:
+                    # a retryable failure is not a "loop": don't let the loop guard count it
+                    self._recent_actions.pop()
                     self.turns.append(
                         f"OBSERVATION: {result.message} "
                         f"(attempt {pick_fail_counts[arg]} of {MAX_PICK_RETRIES + 1} -- worth retrying)"
@@ -446,6 +455,8 @@ class Agent:
             outcome = "step_budget_exhausted"
 
         self._print_mission_report(command, outcome)
+        self.last_outcome = outcome
+        return outcome
 
     def _log(self, step_num, action, arg, ok, failure_type, detail):
         self.trace.append({
@@ -463,7 +474,7 @@ class Agent:
         lines = []
 
         shuffled_locs = list(robot.known_locations)
-        random.shuffle(shuffled_locs)
+        self._rng.shuffle(shuffled_locs)
         for loc in shuffled_locs:
             kind = LOCATION_KIND.get(loc, "location")
             if loc in self.visited_locations:

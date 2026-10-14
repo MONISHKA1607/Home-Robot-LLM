@@ -8,6 +8,7 @@ from dataclasses import dataclass
 class Result:
     ok: bool
     message: str
+    code: str = None   # machine-readable reason, e.g. "grasp_slipped"
 
     def __bool__(self):
         return self.ok
@@ -55,7 +56,6 @@ class WorldObject:
     name: str
     location: str
     category: str
-    safe: bool = True
     graspable: bool = True
 
 
@@ -63,10 +63,10 @@ WORLD_OBJECTS = [
     WorldObject("water_bottle",  "kitchen_counter", "drink"),
     WorldObject("juice_box",     "kitchen_counter", "drink"),
     WorldObject("empty_cup",     "kitchen_counter", "container"),
-    WorldObject("kitchen_knife", "kitchen_counter", "sharp_utensil", safe=False),
+    WorldObject("kitchen_knife", "kitchen_counter", "sharp_utensil"),
     WorldObject("tv_remote",     "dining_table",    "electronics"),
     WorldObject("newspaper",     "dining_table",    "reading"),
-    WorldObject("pill_bottle",   "bedside_table",   "medication", safe=False),
+    WorldObject("pill_bottle",   "bedside_table",   "medication"),
     WorldObject("eyeglasses",    "bedside_table",   "personal_item"),
     WorldObject("book",          "desk",            "reading"),
     WorldObject("towel",         "bathroom",        "linen"),
@@ -194,8 +194,11 @@ class Robot:
         if self._rng.random() < self._grasp_fail_prob:
             self._render(transient=f"pick {object_name} FAILED")
             return Result(False, f"Grasp of '{object_name}' slipped. "
-                                 f"Object is still where it was.")
+                                 f"Object is still where it was.",
+                          code="grasp_slipped")
         self.holding = object_name
+        obj.location = "robot"                  # the world now knows the robot has it
+        self.known_objects.pop(object_name, None)
         self._render(transient=f"picked {object_name}")
         return Result(True, f"Picked up '{object_name}'.")
 
@@ -208,6 +211,13 @@ class Robot:
                                  f"{location_name}. Navigate there first.")
         placed = self.holding
         self.holding = None
+        obj = self._objects[placed]
+        obj.location = self.current_location    # the object really moves in the world
+        self.known_objects[placed] = {
+            "name": placed,
+            "location": obj.location,
+            "category": obj.category,
+        }
         self._render(transient=f"placed {placed}")
         return Result(True, f"Placed '{placed}' at {self.current_location}.")
 

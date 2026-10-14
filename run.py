@@ -1,7 +1,7 @@
 import argparse
 import home_robot_sim as sim
 from agent import Agent
-from tests import TEST_COMMANDS
+from tests import TEST_COMMANDS, CHECKS
 
 
 def build_robot(args):
@@ -18,7 +18,7 @@ def build_robot(args):
 
 def interactive(args):
     robot = build_robot(args)
-    agent = Agent(robot)
+    agent = Agent(robot, seed=args.seed)
     print("Type a request for the robot (or 'quit').")
     while True:
         try:
@@ -32,17 +32,31 @@ def interactive(args):
 
 
 def run_suite(args):
+    results = []
     for category, command in TEST_COMMANDS:
         print("\n" + "#" * 70)
         print(f"[{category}]  {command}")
         print("#" * 70)
         robot = build_robot(args)
-        agent = Agent(robot)
-        agent.handle(command)
+        start = {n: o.location for n, o in robot._objects.items()}
+        agent = Agent(robot, seed=args.seed)
+        outcome = agent.handle(command)
         if robot._last_speech:
             print(f'   FINAL REPLY: "{robot._last_speech}"')
         else:
             print("   (robot never spoke to the person)")
+        # model unreachable / unparseable is an infrastructure failure, never a pass
+        infra_failure = outcome in ("llm_unreachable", "parse_failure")
+        passed = (not infra_failure) and bool(CHECKS[category](robot, outcome, start))
+        print(f"   RESULT: {'PASS' if passed else 'FAIL'}  (outcome={outcome})")
+        results.append((category, passed))
+
+    print("\n" + "=" * 70)
+    for category, passed in results:
+        print(f"  {'PASS' if passed else 'FAIL'}  {category}")
+    n_pass = sum(p for _, p in results)
+    print(f"\n  {n_pass}/{len(results)} scenarios passed")
+    raise SystemExit(0 if n_pass == len(results) else 1)
 
 
 if __name__ == "__main__":
