@@ -1,3 +1,4 @@
+import copy
 import math
 import random
 import heapq
@@ -136,7 +137,7 @@ class Robot:
         self._pos = LOCATIONS[start]
         self._last_speech = ""
         self._log = []
-        self._objects = {o.name: o for o in WORLD_OBJECTS}
+        self._objects = {o.name: copy.copy(o) for o in WORLD_OBJECTS}  # private copies: no state leaks between robots
 
         self._render()
 

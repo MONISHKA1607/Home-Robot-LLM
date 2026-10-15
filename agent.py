@@ -287,9 +287,11 @@ class Agent:
         self._recent_actions = []
         self._consecutive_speaks = 0
         self.last_pickup_location = None
+        self.current_command = ""
 
     def handle(self, command):
         self.turns.append(f"PERSON: {command}")
+        self.current_command = command
         system = SYSTEM_TEMPLATE.format(locations=self.robot.known_locations)
         pick_fail_counts = {}
         self.trace = []
@@ -518,6 +520,7 @@ class Agent:
 
         recent_turns = self.turns[-8:] 
         state = (
+            f"THE PERSON'S ORIGINAL REQUEST (always keep this in mind): {self.current_command}\n"
             f"Current location: {self.robot.current_location}\n"
             f"Holding: {self.robot.holding}\n"
             f"{loop_hint}"

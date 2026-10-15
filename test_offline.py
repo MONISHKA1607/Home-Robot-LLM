@@ -124,6 +124,20 @@ class OfflineTests(unittest.TestCase):
         agent.handle("second")
         self.assertEqual(agent.visited_locations, [])
 
+    # 12. REGRESSION: two robots must not share world state
+    def test_robots_do_not_share_world_state(self):
+        r1 = sim.Robot()
+        r1._objects["book"].location = "living_room"
+        r2 = sim.Robot()
+        self.assertEqual(r2._objects["book"].location, "desk")
+
+    # 13. REGRESSION: the original request must survive a long run
+    def test_original_request_never_scrolls_out(self):
+        a = Agent(sim.Robot(), seed=0)
+        a.current_command = "Bring me my phone charger"
+        a.turns = ["PERSON: Bring me my phone charger"] + [f"OBSERVATION: step {i}" for i in range(30)]
+        self.assertIn("phone charger", a._build_transcript())
+
     # 11. step budget: a model that never finishes gets stopped
     def test_step_budget(self):
         locs = ["kitchen", "bedroom", "study", "bathroom", "living_room"]
